@@ -1,0 +1,153 @@
+#include <LoRa.h>
+#include <Wire.h>
+#include <Adafruit_MPU6050.h>
+#include <Adafruit_Sensor.h>
+#include <TinyGPS++.h>
+#include <OneWire.h>
+#include <DallasTemperature.h>
+
+// LoRa Pins
+#define ss 5
+#define rst 14
+#define dio0 2
+
+// GPS setup
+#define RX 16 // GPS RX
+#define TX 17 // GPS TX
+TinyGPSPlus gps;
+HardwareSerial GPSModule(1); // Use UART1 for GPS
+
+// MPU6050 setup
+Adafruit_MPU6050 mpu;
+
+// DS18B20 setup
+#define ONE_WIRE_BUS 4 // Pin for DS18B20 data
+OneWire oneWire(ONE_WIRE_BUS);
+DallasTemperature sensors(&oneWire);
+
+// Voltage sensor setup
+#define VOLTAGE_SENSOR_PIN 34 // ADC pin for voltage sensor
+float voltageDividerR1 = 10000; // 10kΩ resistor
+float voltageDividerR2 = 20000; // 20kΩ resistor
+
+// Water flow sensor setup
+#define WATER_FLOW_SENSOR_PIN 25 // Pin for water flow sensor
+volatile unsigned long pulseCount = 0;
+float flowRate = 0.0;
+float totalLiters = 0.0;
+
+// Timing variables
+unsigned long previousMillis = 0;
+const unsigned long interval = 10000; // 10 seconds
+
+// Sender ID
+#define SENDER_ID "Sender_2"
+
+// Interrupt service routine for water flow sensor
+void IRAM_ATTR pulseCounter() {
+    pulseCount++;
+}
+
+void setup() {
+    Serial.begin(115200);
+
+    // Initialize GPS module
+    GPSModule.begin(9600, SERIAL_8N1, RX, TX);
+    Serial.println("GPS module initialized.");
+
+    // Initialize MPU6050
+    if (!mpu.begin()) {
+        Serial.println("Failed to find MPU6050 chip. Check your wiring.");
+        while (1);
+    }
+    mpu.setAccelerometerRange(MPU6050_RANGE_8_G);
+    mpu.setGyroRange(MPU6050_RANGE_500_DEG);
+    mpu.setFilterBandwidth(MPU6050_BAND_21_HZ);
+    Serial.println("MPU6050 initialized.");
+
+    // Initialize DS18B20
+    sensors.begin();
+    Serial.println("DS18B20 temperature sensor initialized.");
+
+    // Set up water flow sensor
+    pinMode(WATER_FLOW_SENSOR_PIN, INPUT_PULLUP);
+    attachInterrupt(digitalPinToInterrupt(WATER_FLOW_SENSOR_PIN), pulseCounter, RISING);
+    Serial.println("Water flow sensor initialized.");
+
+    // Initialize LoRa
+    LoRa.setPins(ss, rst, dio0);
+    while (!LoRa.begin(433E6)) {
+        Serial.println("Initializing LoRa...");
+        delay(500);
+    }
+    LoRa.setSyncWord(0xA5);
+    Serial.println("LoRa Initialized");
+}
+
+void loop() {
+    unsigned long currentMillis = millis();
+
+    // Read GPS data
+    while (GPSModule.available() > 0) {
+        char c = GPSModule.read();
+        gps.encode(c);
+    }
+
+    // MPU6050 data reading
+    sensors_event_t a, g, temp;
+    mpu.getEvent(&a, &g, &temp);
+
+    // Read water temperature from DS18B20
+    sensors.requestTemperatures();
+    float waterTemperature = sensors.getTempCByIndex(0);
+
+    // Calculate water flow rate and total volume
+    static unsigned long lastFlowUpdate = 0;
+    if (currentMillis - lastFlowUpdate >= 1000) {
+        float flowFrequency = pulseCount; // Pulses per second
+        pulseCount = 0;
+        flowRate = (flowFrequency / 7.5); // Convert to liters per minute
+        totalLiters += (flowRate / 60); // Increment total liters
+        lastFlowUpdate = currentMillis;
+    }
+
+    // Read voltage sensor
+    float rawVoltage = analogRead(VOLTAGE_SENSOR_PIN) * (3.3 / 4095.0);
+    float actualVoltage = rawVoltage * ((voltageDividerR1 + voltageDividerR2) / voltageDividerR2);
+
+    // Send data over LoRa every interval
+    if (currentMillis - previousMillis >= interval) {
+        previousMillis = currentMillis;
+
+        // Create a JSON-like packet
+        String dataPacket = SENDER_ID;
+        dataPacket += "; ";  
+        if (gps.location.isValid()) {
+            dataPacket += "Lat:" + String(gps.location.lat(), 6) + ",";
+            dataPacket += "Lon:"  + String(gps.location.lng(), 6) + ",";
+            dataPacket += "Alt:" + String(gps.altitude.meters()) + ",";
+        } else {
+            dataPacket += "\"Lat\":null,\"Lon\":null,\"Alt\":null},";
+        }
+        dataPacket += "Accel X: " + String(a.acceleration.x, 2) + " m/s^2, ";
+        dataPacket += "Accel Y: " + String(a.acceleration.y, 2) + " m/s^2, ";
+        dataPacket += "Accel Z: " + String(a.acceleration.z, 2) + " m/s^2, ";
+        dataPacket += "Gyro X: " + String(g.gyro.x, 2) + " rad/s, ";
+        dataPacket += "Gyro Y: " + String(g.gyro.y, 2) + " rad/s, ";
+        dataPacket += "Gyro Z: " + String(g.gyro.z, 2) + " rad/s; ";
+        dataPacket += "WaterTemp:" + String(waterTemperature, 2) + ",";
+        dataPacket += "FlowRate:" + String(flowRate, 2) + ",";
+        // dataPacket += "\"TotalLiters\":" + String(totalLiters, 2) + ",";
+        dataPacket += "Voltage:" + String(actualVoltage, 2);
+
+        // Send over LoRa
+        Serial.println("Sending packet:");
+        Serial.println(dataPacket);
+        LoRa.beginPacket();
+        LoRa.print(dataPacket);
+        LoRa.endPacket();
+
+        // Add a random delay to minimize collision
+        delay(random(100, 500));
+    }
+}
