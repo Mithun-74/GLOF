@@ -1,0 +1,109 @@
+#include <LoRa.h>
+#include <Wire.h>
+#include <Adafruit_MPU6050.h>
+#include <Adafruit_Sensor.h>
+#include <DHT.h>
+
+// LoRa Pins
+#define ss 5
+#define rst 14
+#define dio0 2
+
+// Sender Identifier
+#define SENDER_ID "Sender_1" // Unique ID for this sender
+
+// MPU6050 setup
+Adafruit_MPU6050 mpu;
+
+// DHT11 setup
+#define DHTPIN 33 // Pin for DHT11
+#define DHTTYPE DHT11
+DHT dht(DHTPIN, DHTTYPE);
+
+// Vibration sensor setup
+#define VIBRATION_SENSOR_PIN 34 // Analog pin for vibration sensor
+
+// Timing variables
+unsigned long previousMillis = 0;
+const unsigned long interval = 10000; // 10 seconds
+
+void setup() {
+    Serial.begin(115200);
+
+    // Initialize MPU6050
+    Serial.println("Initializing MPU6050...");
+    if (!mpu.begin()) {
+        Serial.println("Failed to find MPU6050 chip. Check your wiring.");
+        while (1); // Halt execution
+    }
+    mpu.setAccelerometerRange(MPU6050_RANGE_8_G);
+    mpu.setGyroRange(MPU6050_RANGE_500_DEG);
+    mpu.setFilterBandwidth(MPU6050_BAND_21_HZ);
+    Serial.println("MPU6050 initialized successfully.");
+
+    // Initialize DHT11
+    Serial.println("Initializing DHT11...");
+    dht.begin();
+    Serial.println("DHT11 initialized successfully.");
+
+    // Set up vibration sensor pin
+    pinMode(VIBRATION_SENSOR_PIN, INPUT);
+
+    // Initialize LoRa
+    Serial.println("Initializing LoRa...");
+    LoRa.setPins(ss, rst, dio0);
+    while (!LoRa.begin(433E6)) {
+        Serial.println("Failed to initialize LoRa. Retrying...");
+        delay(500);
+    }
+    LoRa.setSyncWord(0xA5);
+    Serial.println("LoRa initialized successfully.");
+}
+
+void loop() {
+    unsigned long currentMillis = millis();
+
+    // Read MPU6050 data
+    sensors_event_t a, g, temp;
+    if (!mpu.getEvent(&a, &g, &temp)) {
+        Serial.println("Failed to fetch MPU6050 data!");
+        return;
+    }
+
+    // Read DHT11 data
+    float temperature = dht.readTemperature();
+    float humidity = dht.readHumidity();
+    if (isnan(temperature) || isnan(humidity)) {
+        Serial.println("Failed to read from DHT11 sensor!");
+        temperature = 0.0;
+        humidity = 0.0;
+    }
+
+    // Read vibration sensor value (analog signal)
+    int vibrationValue = analogRead(VIBRATION_SENSOR_PIN);
+
+    // Send data over LoRa every interval
+    if (currentMillis - previousMillis >= interval) {
+        previousMillis = currentMillis;
+
+        // Combine all sensor data into a string
+        String dataPacket = SENDER_ID; // Add sender ID
+        dataPacket += "; ";            // Separator for readability
+        dataPacket += "Accel X: " + String(a.acceleration.x, 2) + " m/s^2, ";
+        dataPacket += "Accel Y: " + String(a.acceleration.y, 2) + " m/s^2, ";
+        dataPacket += "Accel Z: " + String(a.acceleration.z, 2) + " m/s^2, ";
+        dataPacket += "Gyro X: " + String(g.gyro.x, 2) + " rad/s, ";
+        dataPacket += "Gyro Y: " + String(g.gyro.y, 2) + " rad/s, ";
+        dataPacket += "Gyro Z: " + String(g.gyro.z, 2) + " rad/s; ";
+        dataPacket += "Temperature: " + String(temperature, 2) + " °C, ";
+        dataPacket += "Humidity: " + String(humidity, 2) + " %, ";
+        dataPacket += "Vibration: " + String(vibrationValue) + " ADC";
+
+        // Send data packet via LoRa
+        Serial.println("Sending packet:");
+        Serial.println(dataPacket);
+        LoRa.beginPacket();
+        LoRa.print(dataPacket);
+        LoRa.endPacket();
+    }
+}
